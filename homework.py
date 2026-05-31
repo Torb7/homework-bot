@@ -1,25 +1,23 @@
-# К сожелению в этом проекте тесты настроены очень жёстко - шаг влево, шаг
-# вправо и они падают, поэтому пришлось подстраиваться под них - из-за этого
-# один пункт ТЗ не смог выполнить(отправка ошибок в телеграм). Плюс есть
-# странные моменты в "архитектуре" или я что-то не понял - я их отметил
-# в комментариях в коде.
-from datetime import datetime, timedelta
 import logging
 import os
 import sys
 import time
+from http import HTTPStatus
+from typing import Any
 
-from dotenv import load_dotenv
 import requests
+from dotenv import load_dotenv
 from telebot import TeleBot, apihelper
 
-from exceptions import TokenError
+from exceptions import TokenError, PracticumAPIError
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+formatter = logging.Formatter(
+    '%(asctime)s %(levelname)s %(funcName)s %(message)s'
+)
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(formatter)
 logger.addHandler(handler)
@@ -41,129 +39,138 @@ HOMEWORK_VERDICTS = {
 }
 
 
-def check_tokens():
+def check_tokens() -> None:
     """Проверяет доступность переменных окружения."""
-    if not all((PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)):
-        logger.critical('Отсутствуют обязательные переменные окружения')
-        raise TokenError()
+    tokens = ('PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID')
+    missing_tokens = [token for token in tokens if not globals()[token]]
+
+    if missing_tokens:
+        message = f'Отсутствуют переменные окружения: {missing_tokens}'
+        logger.critical(message)
+        raise TokenError(message)
 
 
-def send_message(bot, message):
+def send_message(bot: TeleBot, message: str) -> None:
     """Отправляет сообщение в Telegram-чат."""
-    try:
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        logger.debug('Сообщение успешно отправлено')
+    logger.debug('Начало выполнения отправки сообщения')
 
-    except apihelper.ApiTelegramException as error:
-        logger.error(f'Ошибка Telegram API: {error}')
+    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
-    except requests.RequestException as error:
-        logger.error(f'Ошибка сети при подключении к Telegram API: {error}')
+    logger.debug('Сообщение успешно отправлено')
 
 
-def get_api_answer(timestamp):
+def get_api_answer(timestamp: int) -> dict[str, Any]:
     """Делает запрос к эндпоинту API-сервиса."""
     payload = {'from_date': timestamp}
+
+    logger.debug(
+        f'Начало выполнения запроса к {ENDPOINT} с параметрами: {payload}'
+    )
 
     try:
         response = requests.get(
             ENDPOINT, headers=HEADERS, params=payload, timeout=5
         )
-        # Пришлось писать такую конструкцию, потому что если использовать
-        # response.raise_for_status() - падают тесты.
-        if response.status_code != 200:
-            raise requests.HTTPError()
-
-        return response.json()
-
-    except requests.HTTPError:
-        # Если просто залогировать ошибку здесь и не прокидывать исключение
-        # дальше - падают тесты.
-        raise requests.HTTPError()
 
     except requests.RequestException as error:
-        # Здесь не возможно отправить сообщение в Telegram, но если вынести
-        # этот блок за функцию - падают тесты. Так же из-за этого блока здесь,
-        # функция возвращает None и приходиться в 142 строке выбрасывать
-        # исключение, тут же его нельзя пробросить - падают тесты.
-        logger.error(error)
+        raise PracticumAPIError(error) from error
+
+    if response.status_code != HTTPStatus.OK:
+        raise PracticumAPIError(
+            f'Неверный статус-код Practicum API: {response.status_code}'
+        )
+
+    logger.debug(
+        f'Успешное завершение запроса к {ENDPOINT} с параметрами: {payload}'
+    )
+
+    return response.json()
 
 
-def check_response(response):
+def check_response(response: dict[str, Any]) -> None:
     """Проверяет ответ API на соответствие документации."""
+    logger.debug('Начало выполнения функции check_response')
+
     if not isinstance(response, dict):
-        raise TypeError('Ответ не является dict')
+        raise TypeError(f'Тип данных ответа: {response} - не является dict')
 
     if 'homeworks' not in response:
         raise KeyError('В ответе отсутствует ключ homeworks')
 
-    if 'current_date' not in response:
-        raise KeyError('В ответе отсутствует ключ current_date')
-
-    if not isinstance(response['current_date'], int):
-        raise TypeError('Ключ current_date не является int')
-
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
-        raise TypeError('Ключ homeworks не является list')
+        raise TypeError(
+            f'Тип данных ключа homeworks: {homeworks} - не является list'
+        )
 
-    if homeworks:
-        for homework in homeworks:
-            if not isinstance(homework, dict):
-                raise TypeError('Данные в homeworks не являются dict')
+    logger.debug('Успешное завершение функции check_response')
 
 
-def parse_status(homework):
+def parse_status(homework: dict[str, Any]) -> str:
     """Обработка homework и генерация строки ответа."""
-    status = homework.get('status')
-    homework_name = homework.get('homework_name')
+    logger.debug('Начало выполнения функции parse_status')
 
-    if status is None:
-        raise KeyError('Отсутствует ключ status')
+    if not isinstance(homework, dict):
+        raise TypeError(f'Тип данных homework: {homework} - не является dict')
 
-    if homework_name is None:
-        raise KeyError('Отсутствует ключ homework_name')
+    keys = ('status', 'homework_name')
+    missing_keys = [key for key in keys if key not in homework]
+    if missing_keys:
+        raise KeyError(f'В homework отсутствует ключи: {missing_keys}')
 
+    status = homework['status']
     if status not in HOMEWORK_VERDICTS:
-        raise ValueError('Неверный ключ status')
+        raise ValueError(f'Неизвестное значение ключа status: {status}')
 
+    homework_name = homework['homework_name']
     verdict = HOMEWORK_VERDICTS[status]
+
+    logger.debug('Успешное завершение функции parse_status')
 
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-def main():
+def main() -> None:
     """Основная логика работы бота."""
     check_tokens()
     bot = TeleBot(token=TELEGRAM_TOKEN)
 
-    timestamp = int(
-        (datetime.now() - timedelta(seconds=RETRY_PERIOD)).timestamp()
-    )
+    prev_message = ''
+    timestamp = int(time.time()) - RETRY_PERIOD
 
     while True:
         try:
             data = get_api_answer(timestamp)
-            if not data:
-                raise requests.RequestException()
             check_response(data)
 
             homeworks = data['homeworks']
-            if homeworks:
-                message = parse_status(homeworks[-1])
-                send_message(bot, message)
-            else:
+            if not homeworks:
                 logger.debug('В ответе отсутствуют новые статусы')
+                continue
 
-            timestamp = data['current_date']
+            message = parse_status(homeworks[-1])
+            if prev_message != message:
+                send_message(bot, message)
+                prev_message = message
+
+            timestamp += RETRY_PERIOD
+
+        except (
+            apihelper.ApiTelegramException,
+            requests.RequestException,
+        ) as error:
+            logger.exception(f'Ошибка Telegram API: {error}')
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logger.error(message)
-            # По ТЗ все события уровня ERROR нужно пересылать ещё в Telegram,
-            # но если это сделать тут - падают тесты.
+            logger.exception(message)
 
-        time.sleep(RETRY_PERIOD)
+            if prev_message != message:
+                send_message(bot, message)
+                prev_message = message
+
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
