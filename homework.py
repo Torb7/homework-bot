@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import suppress
 from http import HTTPStatus
 from typing import Any
 
@@ -45,7 +46,9 @@ def check_tokens() -> None:
     missing_tokens = [token for token in tokens if not globals()[token]]
 
     if missing_tokens:
-        message = f'Отсутствуют переменные окружения: {missing_tokens}'
+        message = (
+            f'Отсутствуют переменные окружения: {", ".join(missing_tokens)}'
+        )
         logger.critical(message)
         raise TokenError(message)
 
@@ -92,7 +95,9 @@ def check_response(response: dict[str, Any]) -> None:
     logger.debug('Начало выполнения функции check_response')
 
     if not isinstance(response, dict):
-        raise TypeError(f'Тип данных ответа: {response} - не является dict')
+        raise TypeError(
+            f'Тип данных ответа: {type(response).__name__} - не является dict'
+        )
 
     if 'homeworks' not in response:
         raise KeyError('В ответе отсутствует ключ homeworks')
@@ -100,7 +105,10 @@ def check_response(response: dict[str, Any]) -> None:
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
         raise TypeError(
-            f'Тип данных ключа homeworks: {homeworks} - не является list'
+            (
+                f'Тип данных ключа homeworks: {type(homeworks).__name__} - '
+                f'не является list'
+            )
         )
 
     logger.debug('Успешное завершение функции check_response')
@@ -111,12 +119,19 @@ def parse_status(homework: dict[str, Any]) -> str:
     logger.debug('Начало выполнения функции parse_status')
 
     if not isinstance(homework, dict):
-        raise TypeError(f'Тип данных homework: {homework} - не является dict')
+        raise TypeError(
+            (
+                f'Тип данных homework: {type(homework).__name__} - '
+                f'не является dict'
+            )
+        )
 
     keys = ('status', 'homework_name')
     missing_keys = [key for key in keys if key not in homework]
     if missing_keys:
-        raise KeyError(f'В homework отсутствует ключи: {missing_keys}')
+        raise KeyError(
+            f'В homework отсутствует ключи: {", ".join(missing_keys)}'
+        )
 
     status = homework['status']
     if status not in HOMEWORK_VERDICTS:
@@ -136,12 +151,16 @@ def main() -> None:
     bot = TeleBot(token=TELEGRAM_TOKEN)
 
     prev_message = ''
-    timestamp = int(time.time()) - RETRY_PERIOD
+    timestamp = int(time.time())
 
     while True:
         try:
             data = get_api_answer(timestamp)
             check_response(data)
+
+            current_date = data.get('current_date')
+            if isinstance(current_date, int):
+                timestamp = current_date
 
             homeworks = data['homeworks']
             if not homeworks:
@@ -152,8 +171,6 @@ def main() -> None:
             if prev_message != message:
                 send_message(bot, message)
                 prev_message = message
-
-            timestamp += RETRY_PERIOD
 
         except (
             apihelper.ApiTelegramException,
@@ -166,8 +183,11 @@ def main() -> None:
             logger.exception(message)
 
             if prev_message != message:
-                send_message(bot, message)
-                prev_message = message
+                with suppress(
+                    apihelper.ApiTelegramException, requests.RequestException
+                ):
+                    send_message(bot, message)
+                    prev_message = message
 
         finally:
             time.sleep(RETRY_PERIOD)
