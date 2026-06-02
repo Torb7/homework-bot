@@ -158,10 +158,6 @@ def main() -> None:
             data = get_api_answer(timestamp)
             check_response(data)
 
-            current_date = data.get('current_date')
-            if isinstance(current_date, int):
-                timestamp = current_date
-
             homeworks = data['homeworks']
             if not homeworks:
                 logger.debug('В ответе отсутствуют новые статусы')
@@ -171,6 +167,8 @@ def main() -> None:
             if prev_message != message:
                 send_message(bot, message)
                 prev_message = message
+
+            timestamp = int(data.get('current_date', timestamp))
 
         except (
             apihelper.ApiTelegramException,
